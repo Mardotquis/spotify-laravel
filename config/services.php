@@ -45,7 +45,11 @@ return [
     'spotify' => [
         'client_id' => env('SPOTIFY_CLIENT_ID'),
         'client_secret' => env('SPOTIFY_CLIENT_SECRET'),
-        'redirect_uri' => env('SPOTIFY_REDIRECT_URI'),
+        'redirect_uri' => function_exists('env') ?
+            (rtrim(env('APP_URL', 'http://localhost'), '/') .
+            (env('APP_PORT') && env('APP_PORT') != 80 ? ':' . env('APP_PORT') : '') .
+            '/callback') :
+            'http://localhost/callback',
         'access_token' => env('SPOTIFY_ACCESS_TOKEN'),
         'refresh_token' => env('SPOTIFY_REFRESH_TOKEN'),
     ],

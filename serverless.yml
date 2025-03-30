@@ -1,0 +1,151 @@
+service: spotify-laravel-sync # Choose a unique service name
+
+provider:
+  name: aws
+  region: us-east-1 # Replace with your desired AWS region
+  stage: ${opt:stage, 'dev'} # Deployment stage (dev, prod, etc.)
+
+  # Environment variables for ALL functions
+  # Use Secrets Manager for sensitive data
+  environment:
+    # --- Laravel / Bref ---
+    APP_NAME: "Spotify Sync"
+    APP_ENV: ${self:provider.stage} # Use stage name (dev, prod)
+    APP_DEBUG: ${param:debug, 'false'} # Default to false, can override with --param="debug=true"
+    APP_URL: !Sub "https://${ApiGatewayRestApi}.execute-api.${aws:region}.amazonaws.com/${self:provider.stage}" # Auto-set based on API Gateway
+    APP_CONFIG_CACHE: /tmp/storage/bootstrap/cache/config.php # Bref recommended cache paths
+    APP_EVENTS_CACHE: /tmp/storage/bootstrap/cache/events.php
+    APP_PACKAGES_CACHE: /tmp/storage/bootstrap/cache/packages.php
+    APP_ROUTES_CACHE: /tmp/storage/bootstrap/cache/routes.php
+    APP_SERVICES_CACHE: /tmp/storage/bootstrap/cache/services.php
+    VIEW_COMPILED_PATH: /tmp/storage/framework/views
+    CACHE_DRIVER: array # Use 'redis' if you set up ElastiCache, otherwise 'array' or 'dynamodb'
+    LOG_CHANNEL: stderr # Log to CloudWatch
+    SESSION_DRIVER: cookie # Use 'redis' or 'database' if needed, 'cookie' is simplest for stateless
+
+    # --- Database (Supabase/PostgreSQL) ---
+    DB_CONNECTION: pgsql # Set to PostgreSQL
+    # Replace with your actual Supabase connection details
+    # Recommended: Store sensitive parts like password, host, user, db in Secrets Manager
+    DB_HOST: ${secrets:/${self:provider.stage}/${self:service}/supabase-db-host} # e.g., abc.supabase.co
+    DB_PORT: 5432 # Default PostgreSQL port
+    DB_DATABASE: ${secrets:/${self:provider.stage}/${self:service}/supabase-db-name} # e.g., postgres
+    DB_USERNAME: ${secrets:/${self:provider.stage}/${self:service}/supabase-db-user} # e.g., postgres
+    DB_PASSWORD: ${secrets:/${self:provider.stage}/${self:service}/supabase-db-password} # Reference Secrets Manager
+
+    # --- Spotify API ---
+    # Reference Secrets Manager for Spotify Credentials
+    SPOTIFY_CLIENT_ID: ${secrets:/${self:provider.stage}/${self:service}/spotify-client-id}
+    SPOTIFY_CLIENT_SECRET: ${secrets:/${self:provider.stage}/${self:service}/spotify-client-secret}
+    # SPOTIFY_REDIRECT_URI is now handled dynamically via config/services.php using APP_URL above
+
+    # --- Laravel App Key (Generate with `php artisan key:generate --show` and store securely) ---
+    APP_KEY: ${secrets:/${self:provider.stage}/${self:service}/app-key}
+
+  # NO VPC configuration needed - Lambda runs outside VPC
+
+  # IAM Role permissions for Lambda functions
+  iam:
+    role:
+      statements:
+        # Allow access to read required secrets from Secrets Manager
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource:
+            # Be specific with ARNs for security
+            - arn:aws:secretsmanager:${aws:region}:${aws:accountId}:secret:${self:provider.stage}/${self:service}/app-key-*
+            - arn:aws:secretsmanager:${aws:region}:${aws:accountId}:secret:${self:provider.stage}/${self:service}/spotify-client-id-*
+            - arn:aws:secretsmanager:${aws:region}:${aws:accountId}:secret:${self:provider.stage}/${self:service}/spotify-client-secret-*
+            # Add ARNs for Supabase secrets
+            - arn:aws:secretsmanager:${aws:region}:${aws:accountId}:secret:${self:provider.stage}/${self:service}/supabase-db-host-*
+            - arn:aws:secretsmanager:${aws:region}:${aws:accountId}:secret:${self:provider.stage}/${self:service}/supabase-db-name-*
+            - arn:aws:secretsmanager:${aws:region}:${aws:accountId}:secret:${self:provider.stage}/${self:service}/supabase-db-user-*
+            - arn:aws:secretsmanager:${aws:region}:${aws:accountId}:secret:${self:provider.stage}/${self:service}/supabase-db-password-*
+        # NO SSM Parameter permissions needed for DB connection anymore
+
+plugins:
+  - serverless-bref
+  # Optional: For deploying assets to S3 if needed
+  # - serverless-lift # (Lift simplifies static asset deployment alongside serverless apps)
+  # - serverless-s3-sync
+
+functions:
+  # --- Web Application Function ---
+  web:
+    handler: public/index.php # Bref handler for Laravel web requests
+    description: "Laravel Spotify Sync Web Application"
+    timeout: 28 # API Gateway max timeout is 29s
+    layers:
+      - ${bref:layer.php-82-fpm} # Use appropriate PHP version FPM layer for web
+    events:
+      - httpApi: '*' # Catch all HTTP requests via API Gateway HTTP API
+
+  # --- Console/Artisan Command Function ---
+  console:
+    handler: artisan # Bref handler for Artisan commands
+    description: "Laravel Spotify Sync Console/Artisan Commands"
+    timeout: 300 # Allow longer timeout for potential sync operations (max 900s)
+    layers:
+      - ${bref:layer.php-82} # Use CLI layer
+      - ${bref:layer.console} # Bref console layer
+    events:
+      # --- Scheduled Sync Task ---
+      - schedule:
+          # Replace with your desired schedule (e.g., 'cron(0 0 * * ? *)' for daily at midnight UTC)
+          rate: cron(0 4 * * ? *) # Example: Daily at 4 AM UTC
+          name: ${self:provider.stage}-${self:service}-spotify-sync
+          description: "Scheduled task to sync Spotify liked songs"
+          input:
+            cli: "spotify:sync-liked" # Command to run
+
+# --- Optional: CloudFormation Resources ---
+# Define resources like RDS, Security Groups, Secrets Manager secrets here
+# if you want Serverless Framework to manage them. Often managed separately.
+# Example (Commented out - Requires careful configuration):
+# resources:
+#   Resources:
+#     SpotifyDbSecret:
+#       Type: AWS::SecretsManager::Secret
+#       Properties:
+#         Name: ${self:provider.stage}/${self:service}/db-password
+#         Description: "Database password for Spotify Sync App"
+#         GenerateSecretString:
+#           PasswordLength: 16
+#           ExcludePunctuation: true
+#           IncludeSpace: false
+#     AppKeySecret:
+#       Type: AWS::SecretsManager::Secret
+#       Properties:
+#         Name: ${self:provider.stage}/${self:service}/app-key
+#         Description: "Laravel APP_KEY for Spotify Sync App"
+#         SecretString: "base64:..." # PASTE YOUR GENERATED KEY HERE!
+
+# --- Custom Domain (Optional) ---
+# custom:
+#   customDomain:
+#     domainName: yourapp.yourdomain.com # Replace with your domain
+#     basePath: ''
+#     stage: ${self:provider.stage}
+#     createRoute53Record: true
+
+# --- Bref Configuration ---
+bref:
+  # Skip deployment if only serverless.yml changes (speeds up config tweaks)
+  # skip: true
+  # Exclude files/dirs not needed in the Lambda package
+  # include:
+  #   - public/build # Include frontend assets if using Vite/Mix build
+  exclude:
+    - node_modules/**
+    - public/storage
+    - resources/assets/**
+    - storage/**
+    - tests/**
+    - .git/**
+
+# --- Outputs ---
+outputs:
+  ApiUrl:
+    Description: "URL of the API Gateway endpoint"
+    Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${aws:region}.amazonaws.com/${self:provider.stage}"

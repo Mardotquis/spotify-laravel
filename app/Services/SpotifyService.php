@@ -75,7 +75,7 @@ class SpotifyService
         ];
 
         return $this->session->getAuthorizeUrl([
-            'scope' => implode(' ', $scopes)
+            'scope' => $scopes
         ]);
     }
 
